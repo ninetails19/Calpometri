@@ -7,7 +7,6 @@
 <title>Kalkulator Antropometri</title>
 </head>
 <body>
-
 <div class="sheet">
 
   <div class="masthead">
@@ -62,7 +61,7 @@
       <span class="badge" id="resCategory"></span>
     </div>
 
-    <div class="stat-row">
+    <div class="stat-row" id="statRow">
       <div class="stat">
         <div class="stat-label">IMT</div>
         <div class="stat-value" id="resBmiValue"></div>
@@ -123,6 +122,7 @@
 
   const A_MIN = 0, A_MAX = 60;
   const B_MIN = 61, B_MAX = 228;
+  const SD_EPS = 0.05;
 
   const badgeColors = {
     sev:  'background:var(--brick-bg); color:var(--brick); border-color:var(--brick);',
@@ -133,7 +133,6 @@
     tall: 'background:var(--gold-bg); color:var(--gold); border-color:var(--gold);'
   };
 
-  // Ambil array nilai SD (kg/m2) untuk bulan & jenis kelamin tertentu (indeks IMT/U).
   function getSDRow(totalBulan, genderKey) {
     if (totalBulan <= A_MAX) {
       return { values: NUTRI.A[genderKey][totalBulan], hasSD3pos: true };
@@ -142,14 +141,11 @@
     return { values: NUTRI.B[genderKey][idx], hasSD3pos: false };
   }
 
-  // Baris tabel BB/U atau PB/U-TB/U untuk bulan usia tertentu (0-60 bulan, indeks bulan langsung).
   function monthRow(table, genderKey, ageMonths) {
     const m = Math.max(0, Math.min(60, Math.round(ageMonths)));
     return table[genderKey][m];
   }
 
-  // Interpolasi baris BB/PB atau BB/TB berdasarkan panjang/tinggi badan (cm).
-  // Memakai tabel PB (panjang, telentang) untuk usia <24 bulan, TB (tinggi, berdiri) untuk usia >=24 bulan.
   function interpolateBBIndex(genderKey, ageMonths, heightCm) {
     const which = ageMonths < 24 ? 'pb' : 'tb';
     const table = BBPBTB[genderKey][which];
@@ -167,7 +163,6 @@
 
   function fmt(n) { return Math.round(n * 10) / 10; }
 
-  // Interpolasi Z-score dari suatu nilai terhadap array ambang SD (7 atau 6 nilai, median di tengah).
   function computeZ(val, sdValues) {
     const medianIdx = Math.floor(sdValues.length / 2);
     const median = sdValues[medianIdx];
@@ -191,26 +186,23 @@
     return 0;
   }
 
-  // Kategori BB/U (Permenkes No. 2/2020, usia 0-60 bulan)
   function catBBU(z) {
-    if (z < -3) return { kat: 'Berat badan sangat kurang', cls: 'sev' };
-    if (z < -2) return { kat: 'Berat badan kurang', cls: 'mild' };
+    if (z < -3 - SD_EPS) return { kat: 'Berat badan sangat kurang', cls: 'sev' };
+    if (z < -2 - SD_EPS) return { kat: 'Berat badan kurang', cls: 'mild' };
     if (z <= 1) return { kat: 'Berat badan normal', cls: 'ok' };
     return { kat: 'Risiko berat badan lebih', cls: 'risk' };
   }
 
-  // Kategori PB/U atau TB/U (Permenkes No. 2/2020, usia 0-60 bulan)
   function catPBTBU(z) {
-    if (z < -3) return { kat: 'Sangat pendek (severely stunted)', cls: 'sev' };
-    if (z < -2) return { kat: 'Pendek (stunted)', cls: 'mild' };
+    if (z < -3 - SD_EPS) return { kat: 'Sangat pendek (severely stunted)', cls: 'sev' };
+    if (z < -2 - SD_EPS) return { kat: 'Pendek (stunted)', cls: 'mild' };
     if (z <= 3) return { kat: 'Normal', cls: 'ok' };
     return { kat: 'Tinggi', cls: 'tall' };
   }
 
-  // Kategori bersama untuk BB/PB-BB/TB dan IMT/U usia 0-60 bulan (ambang batas sama persis di Permenkes No. 2/2020)
   function catGiziIndex(z) {
-    if (z < -3) return { kat: 'Gizi buruk (severely wasted)', cls: 'sev' };
-    if (z < -2) return { kat: 'Gizi kurang (wasted)', cls: 'mild' };
+    if (z < -3 - SD_EPS) return { kat: 'Gizi buruk (severely wasted)', cls: 'sev' };
+    if (z < -2 - SD_EPS) return { kat: 'Gizi kurang (wasted)', cls: 'mild' };
     if (z <= 1) return { kat: 'Gizi baik (normal)', cls: 'ok' };
     if (z <= 2) return { kat: 'Berisiko gizi lebih (possible risk of overweight)', cls: 'risk' };
     if (z <= 3) return { kat: 'Gizi lebih (overweight)', cls: 'over' };
@@ -239,15 +231,78 @@
     const rulerBar = document.getElementById('rulerBar');
     const indexWrap = document.getElementById('indexWrap');
     const indexTableBody = document.getElementById('indexTableBody');
+    const statRow = document.getElementById('statRow');
+    const rulerTitleEl = document.querySelector('.ruler-title');
     indexWrap.style.display = 'none';
     indexTableBody.innerHTML = '';
+    statRow.style.display = '';
 
     if (totalBulan <= B_MAX) {
       const clampedBulan = Math.max(A_MIN, Math.min(B_MAX, totalBulan));
-      const { values: sdValues, hasSD3pos } = getSDRow(clampedBulan, genderKey);
-      // Ruler/tabel SD IMT/U hanya ditampilkan untuk usia >60 bulan;
-      // untuk balita (0-60 bulan) IMT/U sudah tercakup di tabel empat indeks.
-      showRuler = !hasSD3pos;
+      const { values: sdValuesIMT, hasSD3pos } = getSDRow(clampedBulan, genderKey);
+      const zScoreIMT = computeZ(imt, sdValuesIMT);
+
+      showRuler = true;
+      let rulerValues, rulerZScore, rulerTitle;
+
+      if (hasSD3pos) {
+        statRow.style.display = 'none';
+
+        const bbuRow = monthRow(BBU, genderKey, totalBulan);
+        const zBBU = computeZ(bb, bbuRow);
+        const cBBU = catBBU(zBBU);
+
+        const pbtbuRow = monthRow(PBTBU, genderKey, totalBulan);
+        const zPBTBU = computeZ(tbCm, pbtbuRow);
+        const cPBTBU = catPBTBU(zPBTBU);
+
+        const bbpbtbRow = interpolateBBIndex(genderKey, totalBulan, tbCm);
+        const zBBPBTB = computeZ(bb, bbpbtbRow);
+        const cBBPBTB = catGiziIndex(zBBPBTB);
+
+        kategori = cBBPBTB.kat; badgeClass = cBBPBTB.cls;
+        deskripsi = 'Berat Badan menurut Panjang/Tinggi Badan (BB/PB atau BB/TB): ' + cBBPBTB.kat + '. Penentuan status gizi balita perlu memperhatikan ketiga indeks (BB/U, PB/U atau TB/U, dan BB/PB atau BB/TB) secara bersamaan, lihat tabel di bawah.';
+
+        rulerValues = bbpbtbRow;
+        rulerZScore = zBBPBTB;
+        rulerTitle = 'Posisi pada skala standar deviasi BB/PB atau BB/TB';
+
+        const rows = [
+          ['BB/U (Berat Badan menurut Umur)', zBBU, cBBU],
+          ['PB/U atau TB/U (Panjang/Tinggi Badan menurut Umur)', zPBTBU, cPBTBU],
+          ['BB/PB atau BB/TB (Berat Badan menurut Panjang/Tinggi Badan)', zBBPBTB, cBBPBTB]
+        ];
+        indexTableBody.innerHTML = rows.map(r => {
+          const label = r[0], z = r[1], c = r[2];
+          const zTxt = (z >= 0 ? '+' : '') + z.toFixed(2) + ' SD';
+          return '<tr><td class="idx-name">' + label + '</td><td class="idx-z">' + zTxt + '</td><td class="idx-cat"><span class="index-pill" style="' + (badgeColors[c.cls] || '') + '">' + c.kat + '</span></td></tr>';
+        }).join('');
+        indexWrap.style.display = 'block';
+
+      } else {
+        zScoreText = (zScoreIMT >= 0 ? '+' : '') + zScoreIMT.toFixed(2) + ' SD';
+        if (zScoreIMT < -3 - SD_EPS) {
+          kategori = 'Gizi buruk'; badgeClass = 'sev';
+          deskripsi = 'Berada di bawah -3 SD (severe thinness). Memerlukan penanganan gizi oleh tenaga kesehatan.';
+        } else if (zScoreIMT < -2 - SD_EPS) {
+          kategori = 'Gizi kurang'; badgeClass = 'mild';
+          deskripsi = 'Berada pada rentang -3 SD hingga di bawah -2 SD (thinness). Perlu perhatian pada asupan nutrisi.';
+        } else if (zScoreIMT <= 1) {
+          kategori = 'Gizi baik'; badgeClass = 'ok';
+          deskripsi = 'Status gizi berada dalam rentang normal, -2 SD hingga +1 SD.';
+        } else if (zScoreIMT <= 2) {
+          kategori = 'Gizi lebih'; badgeClass = 'risk';
+          deskripsi = 'Berada di atas +1 SD hingga +2 SD (overweight). Pantau pola makan dan aktivitas fisik.';
+        } else {
+          kategori = 'Obesitas'; badgeClass = 'over';
+          deskripsi = 'Berada di atas +2 SD (obesity). Disarankan konsultasi ke dokter atau ahli gizi.';
+        }
+        rulerValues = sdValuesIMT;
+        rulerZScore = zScoreIMT;
+        rulerTitle = 'Posisi pada skala standar deviasi IMT/U';
+      }
+
+      rulerTitleEl.textContent = rulerTitle;
 
       const labels = hasSD3pos
         ? ['-3 SD', '-2 SD', '-1 SD', 'Median', '+1 SD', '+2 SD', '+3 SD']
@@ -255,7 +310,7 @@
       document.querySelector('.sd-table thead tr').innerHTML =
         labels.map((l, i) => `<th${i === 3 ? ' class="median"' : ''}>${l}</th>`).join('');
       document.getElementById('sdTableBody').innerHTML =
-        `<tr>${sdValues.map(v => `<td>${fmt(v)}</td>`).join('')}</tr>`;
+        `<tr>${rulerValues.map(v => `<td>${fmt(v)}</td>`).join('')}</tr>`;
 
       rulerBar.querySelectorAll('.zone').forEach(z => z.remove());
       const zoneClasses = hasSD3pos
@@ -270,70 +325,14 @@
       document.querySelector('.ruler-labels').innerHTML =
         labels.map(l => `<span>${l}</span>`).join('');
 
-      let zScore = computeZ(imt, sdValues);
-      zScoreText = (zScore >= 0 ? '+' : '') + zScore.toFixed(2) + ' SD';
-
-      const clampedZ = Math.max(rulerMin - 0.5, Math.min(rulerMax + 0.5, zScore));
+      const clampedZ = Math.max(rulerMin - 0.5, Math.min(rulerMax + 0.5, rulerZScore));
       const pct = ((clampedZ - (rulerMin - 0.5)) / ((rulerMax + 0.5) - (rulerMin - 0.5))) * 100;
       document.getElementById('markerLine').style.left = pct + '%';
       document.getElementById('markerTri').style.left = pct + '%';
 
-      if (hasSD3pos) {
-        // Klasifikasi IMT/U 0-60 bulan (Permenkes 2/2020, WHO Child Growth Standards)
-        const cIMT = catGiziIndex(zScore);
-        kategori = cIMT.kat; badgeClass = cIMT.cls;
-        deskripsi = 'Indeks Massa Tubuh menurut Umur (IMT/U): ' + cIMT.kat + '. Penentuan status gizi balita perlu memperhatikan keempat indeks (BB/U, PB/U atau TB/U, BB/PB atau BB/TB, dan IMT/U) secara bersamaan, lihat tabel di bawah.';
-
-        // Hitung tiga indeks tambahan khusus balita 0-60 bulan
-        const bbuRow = monthRow(BBU, genderKey, totalBulan);
-        const zBBU = computeZ(bb, bbuRow);
-        const cBBU = catBBU(zBBU);
-
-        const pbtbuRow = monthRow(PBTBU, genderKey, totalBulan);
-        const zPBTBU = computeZ(tbCm, pbtbuRow);
-        const cPBTBU = catPBTBU(zPBTBU);
-
-        const bbpbtbRow = interpolateBBIndex(genderKey, totalBulan, tbCm);
-        const zBBPBTB = computeZ(bb, bbpbtbRow);
-        const cBBPBTB = catGiziIndex(zBBPBTB);
-
-        const rows = [
-          ['BB/U (Berat Badan menurut Umur)', zBBU, cBBU],
-          ['PB/U atau TB/U (Panjang/Tinggi Badan menurut Umur)', zPBTBU, cPBTBU],
-          ['BB/PB atau BB/TB (Berat Badan menurut Panjang/Tinggi Badan)', zBBPBTB, cBBPBTB],
-          ['IMT/U (Indeks Massa Tubuh menurut Umur)', zScore, cIMT]
-        ];
-        indexTableBody.innerHTML = rows.map(r => {
-          const label = r[0], z = r[1], c = r[2];
-          const zTxt = (z >= 0 ? '+' : '') + z.toFixed(2) + ' SD';
-          return '<tr><td class="idx-name">' + label + '</td><td class="idx-z">' + zTxt + '</td><td class="idx-cat"><span class="index-pill" style="' + (badgeColors[c.cls] || '') + '">' + c.kat + '</span></td></tr>';
-        }).join('');
-        indexWrap.style.display = 'block';
-      } else {
-        // Klasifikasi IMT/U 61-228 bulan (2007 WHO Reference 5-19 tahun, tanpa jenjang +3 SD)
-        if (zScore < -3) {
-          kategori = 'Gizi buruk'; badgeClass = 'sev';
-          deskripsi = 'Berada di bawah -3 SD (severe thinness). Memerlukan penanganan gizi oleh tenaga kesehatan.';
-        } else if (zScore < -2) {
-          kategori = 'Gizi kurang'; badgeClass = 'mild';
-          deskripsi = 'Berada pada rentang -3 SD hingga di bawah -2 SD (thinness). Perlu perhatian pada asupan nutrisi.';
-        } else if (zScore <= 1) {
-          kategori = 'Gizi baik'; badgeClass = 'ok';
-          deskripsi = 'Status gizi berada dalam rentang normal, -2 SD hingga +1 SD.';
-        } else if (zScore <= 2) {
-          kategori = 'Gizi lebih'; badgeClass = 'risk';
-          deskripsi = 'Berada di atas +1 SD hingga +2 SD (overweight). Pantau pola makan dan aktivitas fisik.';
-        } else {
-          kategori = 'Obesitas'; badgeClass = 'over';
-          deskripsi = 'Berada di atas +2 SD (obesity). Disarankan konsultasi ke dokter atau ahli gizi.';
-        }
-      }
-
       coverageHTML = '';
 
     } else {
-      // DEWASA (>228 bulan, di atas 19 tahun — di luar cakupan tabel anak IMT/U resmi;
-      // untuk usia ini dipakai klasifikasi Kemenkes dewasa)
       showRuler = false;
       zScoreText = 'Tidak berlaku';
 
